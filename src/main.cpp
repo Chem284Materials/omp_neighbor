@@ -4,10 +4,17 @@
 #include <random>
 #include <list>
 #include <omp.h>
+#include <algorithm>
+
+#pragma omp declare reduction(forces_red : std::vector<std::array<double, 3>> : \
+  std::transform(omp_out.begin(), omp_out.end(), omp_in.begin(), omp_out.begin(), \
+        [](std::array<double,3> a, std::array<double,3> b) { \
+          return std::array<double,3>{ a[0] + b[0], a[1] + b[1], a[2] + b[2] }; })) \
+  initializer(omp_priv = decltype(omp_orig)(omp_orig.size()))
 
 // Typedefs used for the neighborlist evaluation
 typedef std::pair<int,int> pairT; // A pair of interacting particles
-typedef std::list<pairT> neighborsT; // A list of pairs
+typedef std::vector<pairT> neighborsT; // A list of pairs
 
 class MDSimulation {
 public:
@@ -218,9 +225,10 @@ void MDSimulation::run(int nsteps, double dt) {
     }
 
     // Evaluate the energy and forces, using a neighborlist
-    for (auto pair = neighbors.begin(); pair != neighbors.end(); pair++) {
-      int iparticle = pair->first;
-      int jparticle = pair->second;
+#pragma omp parallel for reduction(+:potential_energy) reduction(forces_red:forces)
+    for (int ipair = 0; ipair < neighbors.size(); ++ipair) {
+      int iparticle = neighbors[ipair].first;
+      int jparticle = neighbors[ipair].second;
 
       double dx = minimum_image(positions[iparticle][0] - positions[jparticle][0]);
       double dy = minimum_image(positions[iparticle][1] - positions[jparticle][1]);
@@ -228,6 +236,8 @@ void MDSimulation::run(int nsteps, double dt) {
       double r2 = (dx * dx) + (dy * dy) + (dz * dz);
 
       double f = lj_force_with_cutoff(r2);
+
+      potential_energy += lj_potential_with_cutoff(r2);
       forces[iparticle][0] += f * dx;
       forces[iparticle][1] += f * dy;
       forces[iparticle][2] += f * dz;
@@ -235,7 +245,6 @@ void MDSimulation::run(int nsteps, double dt) {
       forces[jparticle][1] -= f * dy;
       forces[jparticle][2] -= f * dz;
 
-      potential_energy += lj_potential_with_cutoff(r2);
     }
     forces_time += omp_get_wtime() - forces_start_time;
 
@@ -254,6 +263,7 @@ void MDSimulation::run(int nsteps, double dt) {
     }
 
     // Print output
+    std::cout.precision(12);
     std::cout << "Iteration " << istep << '\n';
     std::cout << "    Potential Energy: " << potential_energy << '\n';
     std::cout << "    Kinetic Energy:   " << kinetic_energy << '\n';
@@ -268,7 +278,7 @@ void MDSimulation::run(int nsteps, double dt) {
 }
 
 int main(int argc, char** argv) {
-  MDSimulation mysimulation(20.0, 1000);
+  MDSimulation mysimulation(40.0, 8000);
   mysimulation.run(100, 0.005);
   return 0;
 }
